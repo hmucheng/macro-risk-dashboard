@@ -34,16 +34,11 @@ def get_risk_zone(score):
 
 
 def run_pipeline():
-  # -------------------------------------------------------------
-  # 1. 此处保持你原本的 FRED 数据抓取与 CMRS 得分计算逻辑
-  # (以下为示例逻辑，请确保保留你原本真实的抓取与计算代码)
-  # -------------------------------------------------------------
   today_str = datetime.now().strftime("%Y-%m-%d")
 
-  # 假设计算出的当前数据
-  cmrs_score = 82.4  # 替换为你实际算出的 score
-  current_zone = get_risk_zone(cmrs_score)
-
+  # -------------------------------------------------------------
+  # 1. 四大子指标原始值与百分位数（替换为你实际拉取的真实/估算数据）
+  # -------------------------------------------------------------
   indicators_data = {
       "erp": {"raw_value": -0.01, "percentile_score": 95.2},
       "cape": {"raw_value": 41.20, "percentile_score": 96.1},
@@ -51,17 +46,60 @@ def run_pipeline():
       "margin_debt": {"raw_value": 0.05, "percentile_score": 94.5},
   }
 
-  sop_data = {
-      "target_equity_pct": "10% - 20%",
-      "target_cash_pct": "80% - 90%",
-      "execution_steps": [
-          "清理所有高 Beta、高估值概念股，仅保留极少量高股息核心底仓。",
-          "80%+ 资金归避风港 (1-3个月美债)，享受高息同时锁定子弹。",
-          "市场宽度已突破 50%，一票否决强行将权益仓位削减至 10%-20% 极限位。",
-      ],
+  # -------------------------------------------------------------
+  # 💡 2. 定义权重并动态计算 CMRS 综合得分
+  # -------------------------------------------------------------
+  WEIGHTS = {
+      "erp": 0.35,  # 35% 股权风险溢价
+      "cape": 0.25,  # 25% 席勒市盈率
+      "buffett": 0.20,  # 20% 巴菲特指数
+      "margin_debt": 0.20,  # 20% 保证金债务杠杆
   }
 
-  # 构建新的 JSON 数据包
+  # 根据权重比例动态计算综合得分
+  cmrs_score = (
+      WEIGHTS["erp"] * indicators_data["erp"]["percentile_score"]
+      + WEIGHTS["cape"] * indicators_data["cape"]["percentile_score"]
+      + WEIGHTS["buffett"] * indicators_data["buffett"]["percentile_score"]
+      + WEIGHTS["margin_debt"]
+      * indicators_data["margin_debt"]["percentile_score"]
+  )
+  cmrs_score = round(cmrs_score, 1)
+
+  # 根据计算出的得分判定风险状态
+  current_zone = get_risk_zone(cmrs_score)
+
+  # 动态生成 SOP 投资指令
+  if cmrs_score >= 75:
+    target_eq, target_cash = "10% - 20%", "80% - 90%"
+    steps = [
+        "清理所有高 Beta、高估值概念股，仅保留极少量高股息核心底仓。",
+        "80%+ 资金归避风港 (1-3个月美债)，享受高息同时锁定子弹。",
+        "一票否决强行将权益仓位削减至 10%-20% 极限避险位。",
+    ]
+  elif cmrs_score >= 55:
+    target_eq, target_cash = "30% - 50%", "50% - 70%"
+    steps = [
+        "分批锁定过去牛市阶段的收益，停止追高。",
+        "暂停权益类定投，增量资金转向高息货币基金/短债。",
+    ]
+  elif cmrs_score >= 25:
+    target_eq, target_cash = "50% - 70%", "30% - 50%"
+    steps = ["维持正常战术资产配置，安心持股享受复利。", "按既定节奏进行定期定投。"]
+  else:
+    target_eq, target_cash = "80% - 100%", "0% - 20%"
+    steps = [
+        "市场处于历史级低估区，克服恐惧分批重仓建仓。",
+        "将避风港现金/短债陆续转入股票/指数 ETF。",
+    ]
+
+  sop_data = {
+      "target_equity_pct": target_eq,
+      "target_cash_pct": target_cash,
+      "execution_steps": steps,
+  }
+
+  # 构建最新的 JSON 数据包
   new_data = {
       "timestamp": today_str,
       "cmrs_score": cmrs_score,
@@ -71,7 +109,7 @@ def run_pipeline():
   }
 
   # -------------------------------------------------------------
-  # 2. 状态变更检测与 ntfy 消息提醒
+  # 3. 状态变更检测与 ntfy 消息提醒
   # -------------------------------------------------------------
   json_path = "data/latest_scores.json"
   previous_zone = None
@@ -86,7 +124,7 @@ def run_pipeline():
 
   # 如果风险状态发生跨越，触发高优先级的 ntfy 警报推送
   if previous_zone and previous_zone != current_zone:
-    alert_title = f"⚠️ 宏观风控状态变更提醒！"
+    alert_title = "⚠️ 宏观风控状态变更提醒！"
     alert_msg = (
         f"宏观风险状态发生切换！\n上一状态: {previous_zone}\n当前状态:"
         f" {current_zone}\n当前 CMRS 综合得分: {cmrs_score:.1f}\n请及时调整仓位！"
@@ -99,7 +137,7 @@ def run_pipeline():
     json.dump(new_data, f, ensure_ascii=False, indent=2)
 
   # -------------------------------------------------------------
-  # 3. 历史数据追加持久化 (data/history_scores.csv)
+  # 4. 历史数据追加持久化 (data/history_scores.csv)
   # -------------------------------------------------------------
   csv_path = "data/history_scores.csv"
   history_row = {
@@ -114,7 +152,6 @@ def run_pipeline():
 
   if os.path.exists(csv_path):
     df_hist = pd.read_csv(csv_path)
-    # 如果今天还没记录过，追加写入；如果已记录，覆盖今天这行
     if today_str in df_hist["date"].values:
       df_hist.loc[df_hist["date"] == today_str, list(history_row.keys())] = (
           list(history_row.values())
@@ -127,7 +164,9 @@ def run_pipeline():
     df_hist = pd.DataFrame([history_row])
 
   df_hist.to_csv(csv_path, index=False)
-  print("✅ 数据持久化与更新成功完成！")
+  print(
+      f"✅ 数据更新完成！当前根据 35/25/20/20 权重算得 CMRS 得分: {cmrs_score}"
+  )
 
 
 if __name__ == "__main__":
