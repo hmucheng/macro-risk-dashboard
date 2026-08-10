@@ -1,32 +1,33 @@
 {
   "timestamp": "2026-08-10",
-  "cmrs_score": 94.5,
-  "risk_zone": "🔴 极端泡沫区",
+  "cmrs_score": 41.5,
+  "risk_zone": "BLUE: Reasonable Holding Zone",
   "indicators": {
-    "erp": {
-      "raw_value": -0.0187,
-      "percentile_score": 99.2
-    },
     "cape": {
-      "raw_value": 36.58,
-      "percentile_score": 95.8
+      "value": 0.0,
+      "percentile": 25.833333333333336
+    },
+    "erp": {
+      "value": Infinity,
+      "percentile": 0.0
     },
     "buffett": {
-      "raw_value": 3.2915,
-      "percentile_score": 92.5
+      "value": 3.2915254743541307,
+      "percentile": 92.5
     },
     "margin_debt": {
-      "raw_value": 0.0399,
-      "percentile_score": 86.7
+      "value": 0.01915919866261065,
+      "percentile": 82.5
     }
   },
-  "sop_instructions": {
-    "target_equity_pct": "10% - 20%",
-    "target_cash_pct": "80% - 90%",
-    "execution_steps": [
-      "清理所有高 Beta、高估值概念股，仅保留极少量高股息核心底仓。",
-      "80%+ 资金归避风港 (1-3个月美债)，享受高息同时锁定子弹。",
-      "一票否决强行将权益仓位削减至 10%-20% 极限避险位。"
+  "position_advice": {
+    "equity_target": "50-70%",
+    "cash_target": "30-50%",
+    "risk_level": "MODERATE",
+    "actions": [
+      "Maintain normal strategic allocation",
+      "Continue regular dollar-cost averaging",
+      "Rebalance quarterly"
     ]
   }
 }
