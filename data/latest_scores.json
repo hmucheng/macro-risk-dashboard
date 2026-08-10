@@ -1,22 +1,22 @@
 {
   "timestamp": "2026-08-10",
-  "cmrs_score": 95.7,
+  "cmrs_score": 96.0,
   "risk_zone": "🔴 极端泡沫区",
   "indicators": {
     "erp": {
-      "raw_value": 0.3271,
-      "percentile_score": 98.3
+      "raw_value": -0.0093,
+      "percentile_score": 99.2
     },
     "cape": {
-      "raw_value": 2.68,
+      "raw_value": 27.21,
       "percentile_score": 95.8
     },
     "buffett": {
-      "raw_value": 3.46,
+      "raw_value": 1.43,
       "percentile_score": 100.0
     },
     "margin_debt": {
-      "raw_value": 1.2891,
+      "raw_value": 0.0413,
       "percentile_score": 86.7
     }
   },
