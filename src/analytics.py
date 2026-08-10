@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+CMRS 多因子风险评分系统
+严格符合专业金融定义的四大指标计算
+"""
+
 import json
 import os
 from datetime import datetime
@@ -13,279 +19,387 @@ NTFY_URL = "https://ntfy.sh/smcb-z5hnfa1qj2x8vmnbr8uoqlqmrq49"
 
 
 def send_ntfy_alert(title, message, priority="default"):
-    """发送 ntfy 推送"""
+    """Send ntfy notification"""
     try:
         requests.post(
             NTFY_URL,
             data=message.encode("utf-8"),
-            headers={
-                "Title": title,
-                "Priority": priority
-            },
+            headers={"Title": title, "Priority": priority},
             timeout=10,
         )
     except Exception as e:
-        print(f"⚠️ ntfy 推送失败: {e}")
+        print(f"Warning: ntfy push failed: {e}")
 
 
 def get_risk_zone(score):
-    """根据风险评分返回风险区间"""
+    """Map risk score to risk zone"""
     if score >= 75:
-        return "🔴 极端泡沫区"
+        return "RED: Extreme Bubble Zone"
     elif score >= 55:
-        return "🟡 风控警戒区"
+        return "YELLOW: Risk Control Warning Zone"
     elif score >= 25:
-        return "🔵 合理持股区"
+        return "BLUE: Reasonable Holding Zone"
     else:
-        return "🟢 低风险买入区"
+        return "GREEN: Low Risk Buying Zone"
 
 
-def fetch_shiller_cape():
+def fetch_shiller_cape(start_year=1990):
     """
-    获取 Shiller CAPE 数据
-    来源：Robert Shiller 官方数据库
-    返回：月度 DataFrame，包含 CAPE 和 cyclically adjusted earnings
+    Fetch Shiller CAPE data from official source
+    Returns: Monthly DataFrame with CAPE values
     """
-    print("  📊 加载 Shiller CAPE 数据...")
+    print("  [Loading Shiller CAPE data...]")
     try:
-        # 官方 Shiller 数据源
-        shiller_url = "https://raw.githubusercontent.com/datasets/s-and-p-500/master/data/data.csv"
-        shiller_df = pd.read_csv(shiller_url)
-        shiller_df["Date"] = pd.to_datetime(shiller_df["Date"])
-        shiller_df = shiller_df.sort_values("Date").set_index("Date")
+        url = "https://raw.githubusercontent.com/datasets/s-and-p-500/master/data/data.csv"
+        df = pd.read_csv(url)
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df[df["Date"].dt.year >= start_year].copy()
+        df = df.sort_values("Date").set_index("Date")
         
-        # 确保有需要的列
-        if "CAPE" in shiller_df.columns:
-            return shiller_df[["CAPE"]].rename(columns={"CAPE": "cape"})
-        elif "Cyclically Adjusted Price Earnings Ratio" in shiller_df.columns:
-            return shiller_df[["Cyclically Adjusted Price Earnings Ratio"]].rename(
-                columns={"Cyclically Adjusted Price Earnings Ratio": "cape"}
-            )
-        else:
-            raise ValueError("❌ Shiller 数据源列名无法识别")
-    except Exception as e:
-        print(f"  ⚠️ Shiller 数据加载失败: {e}，尝试备用源...")
-        return None
-
-
-def fetch_erp_and_gs10(fred):
-    """
-    获取无风险利率 (GS10) 和计算 ERP
-    ERP = E/P - Rf = (1/CAPE) - (GS10/100)
-    注意：这里假设 1/CAPE ≈ E/P（当 CAPE 基于正常化盈利时成立）
-    """
-    print("  📊 加载 GS10 (10年期美债收益率) 数据...")
-    try:
-        gs10 = fred.get_series("GS10", observation_start="1990-01-01")
-        gs10 = pd.DataFrame({"gs10": gs10})
-        gs10.index.name = "Date"
-        return gs10
-    except Exception as e:
-        print(f"  ❌ GS10 加载失败: {e}")
-        return None
-
-
-def fetch_buffett_index(fred):
-    """
-    巴菲特指标 = 总股市市值 / 名义GDP
+        # Find CAPE column (may have different names)
+        cape_col = None
+        for col in df.columns:
+            if "CAPE" in col.upper() or "PE10" in col.upper():
+                cape_col = col
+                break
+        
+        if cape_col is None:
+            print("    WARNING: CAPE column not found in Shiller data")
+            return None
+        
+        return df[[cape_col]].rename(columns={cape_col: "cape"})
     
-    优先数据源：
-    1. WILL5000PR (Wilshire 5000 总收益指数)
-    2. BOGZ1FL893064105Q (美联储 Z.1 股票市值)
-    3. MMNRNJ (市值的替代品)
+    except Exception as e:
+        print(f"    ERROR: Failed to load Shiller CAPE: {e}")
+        return None
+
+
+def fetch_gs10(fred, start_year=1990):
     """
-    print("  📊 加载巴菲特指标 (市值/GDP) 数据...")
+    Fetch 10-year Treasury yield (GS10) from FRED
+    Returns: Monthly DataFrame with GS10 values
+    """
+    print("  [Loading GS10 (10Y Treasury) data...]")
     try:
-        # 获取 GDP（季度数据，单位：十亿美元）
-        gdp = fred.get_series("GDP", observation_start="1990-01-01")
+        gs10 = fred.get_series("GS10", observation_start=f"{start_year}-01-01")
+        gs10_df = pd.DataFrame({"gs10": gs10})
+        gs10_df.index.name = "Date"
+        return gs10_df
+    except Exception as e:
+        print(f"    ERROR: Failed to load GS10: {e}")
+        return None
+
+
+def fetch_buffett_index(fred, start_year=1990):
+    """
+    Calculate Buffett Indicator = Total Market Cap / Nominal GDP
+    Uses Federal Reserve Z.1 stock market value
+    """
+    print("  [Loading Buffett Index (Market Cap/GDP)...]")
+    try:
+        start_str = f"{start_year}-01-01"
         
-        # 尝试获取市值数据
+        # Get nominal GDP (quarterly, billions of dollars)
+        gdp = fred.get_series("GDP", observation_start=start_str)
+        
+        # Get stock market value from Federal Reserve Z.1
+        # BOGZ1FL893064105Q: Total equity market value (quarterly, millions)
         try:
-            # 美联储 Z.1 官方全美股票总市值（季度，单位：百万美元）
             market_cap = fred.get_series(
-                "BOGZ1FL893064105Q", observation_start="1990-01-01"
+                "BOGZ1FL893064105Q", observation_start=start_str
             )
-            # 转为十亿美元
-            market_cap = market_cap / 1000.0
-            print("    ✓ 使用 BOGZ1FL893064105Q (美联储 Z.1 股票市值)")
+            market_cap = market_cap / 1000.0  # Convert to billions
+            print("    [Using BOGZ1FL893064105Q - Federal Reserve Z.1 stock value]")
         except:
-            # 备用：Wilshire 5000 总市值（日度）
-            try:
-                wilshire = fred.get_series(
-                    "WILL5000PR", observation_start="1990-01-01"
-                )
-                # Wilshire 是股价指数，需要额外处理
-                print("    ✓ 使用 WILL5000PR (Wilshire 5000)")
-                market_cap = wilshire  # 这里假设可以直接使用
-            except:
-                print("    ❌ 无法获取市值数据")
-                return None
+            print("    WARNING: Cannot fetch market cap from FRED")
+            return None
         
-        # 对齐到季度（GDP 是季度数据）
-        df = pd.DataFrame({"market_cap": market_cap, "gdp": gdp})
+        # Align to quarterly frequency (GDP is quarterly)
+        df = pd.DataFrame({
+            "market_cap": market_cap,
+            "gdp": gdp
+        })
         df = df.resample("QS").first().ffill()
+        df = df.dropna()
         
-        # 计算比例（去掉任何乘除系数）
+        # Calculate ratio (no extra coefficients)
         df["buffett_raw"] = df["market_cap"] / df["gdp"]
         
-        return df[["buffett_raw"]].dropna()
+        return df[["buffett_raw"]]
     
     except Exception as e:
-        print(f"  ❌ 巴菲特指标加载失败: {e}")
+        print(f"    ERROR: Failed to load Buffett Index: {e}")
         return None
 
 
-def fetch_margin_debt(fred):
+def fetch_margin_debt(fred, start_year=1990):
     """
-    保证金债务 / GDP
-    
-    数据源：
-    1. FINRA 官方保证金债务数据
-    2. 美联储 Z.1 Broker-Dealer 信用额度
+    Calculate Margin Debt / GDP
+    Uses Federal Reserve Z.1 broker-dealer credit data
     """
-    print("  📊 加载保证金债务数据...")
+    print("  [Loading Margin Debt/GDP...]")
     try:
-        # 获取 GDP
-        gdp = fred.get_series("GDP", observation_start="1990-01-01")
+        start_str = f"{start_year}-01-01"
         
-        # 尝试获取保证金债务
+        # Get GDP
+        gdp = fred.get_series("GDP", observation_start=start_str)
+        
+        # Get margin debt: BOGZ1FL663067003Q
+        # Broker-Dealer Credit (quarterly, millions)
         try:
-            # 美联储 Z.1 Broker-Dealer Credit Liabilities（季度，单位：百万美元）
             margin_debt = fred.get_series(
-                "BOGZ1FL663067003Q", observation_start="1990-01-01"
+                "BOGZ1FL663067003Q", observation_start=start_str
             )
-            margin_debt = margin_debt / 1000.0  # 转为十亿美元
-            print("    ✓ 使用 BOGZ1FL663067003Q (美联储 Z.1 经纪商信用)")
+            margin_debt = margin_debt / 1000.0  # Convert to billions
+            print("    [Using BOGZ1FL663067003Q - Fed Z.1 Broker-Dealer Credit]")
         except:
-            print("    ⚠️ 无法获取FRED保证金数据，尝试在线源...")
-            # 备用：直接从 FINRA 官网爬取（这里省略具体实现）
-            raise ValueError("保证金数据获取失败")
+            print("    WARNING: Cannot fetch margin debt from FRED")
+            return None
         
-        # 对齐到季度
-        df = pd.DataFrame({"margin_debt": margin_debt, "gdp": gdp})
+        # Align to quarterly
+        df = pd.DataFrame({
+            "margin_debt": margin_debt,
+            "gdp": gdp
+        })
         df = df.resample("QS").first().ffill()
+        df = df.dropna()
         
-        # 计算比例
+        # Calculate ratio
         df["margin_debt_raw"] = df["margin_debt"] / df["gdp"]
         
-        return df[["margin_debt_raw"]].dropna()
+        return df[["margin_debt_raw"]]
     
     except Exception as e:
-        print(f"  ❌ 保证金债务加载失败: {e}")
+        print(f"    ERROR: Failed to load margin debt: {e}")
         return None
+
+
+def calculate_risk_score(df_all):
+    """
+    Calculate CMRS (Comprehensive Market Risk Score)
+    
+    Methodology:
+    - Calculate 10-year rolling percentile for each indicator
+    - Weight: ERP(35%) + CAPE(25%) + Buffett(20%) + Margin(20%)
+    - Higher score = Higher risk
+    """
+    latest = df_all.iloc[-1]
+    window = df_all.iloc[-120:]  # 10-year rolling window
+    
+    # Percentile calculations
+    # NOTE: Direction matters for interpretation
+    
+    # ERP: Higher ERP = Lower risk, so REVERSE percentile
+    erp_pct = 100.0 * (1.0 - (window["erp_raw"] <= latest["erp_raw"]).mean())
+    
+    # CAPE: Higher CAPE = Higher risk, so NORMAL percentile
+    cape_pct = 100.0 * (window["cape"] <= latest["cape"]).mean()
+    
+    # Buffett: Higher ratio = Higher risk, so NORMAL percentile
+    buffett_pct = 100.0 * (window["buffett_raw"] <= latest["buffett_raw"]).mean()
+    
+    # Margin Debt: Higher margin = Higher risk, so NORMAL percentile
+    margin_pct = 100.0 * (window["margin_debt_raw"] <= latest["margin_debt_raw"]).mean()
+    
+    # Weighted score
+    cmrs_score = round(
+        0.35 * erp_pct + 0.25 * cape_pct + 0.20 * buffett_pct + 0.20 * margin_pct,
+        1,
+    )
+    
+    return {
+        "cmrs_score": cmrs_score,
+        "erp_pct": erp_pct,
+        "cape_pct": cape_pct,
+        "buffett_pct": buffett_pct,
+        "margin_pct": margin_pct,
+        "latest": latest,
+    }
+
+
+def get_position_advice(cmrs_score):
+    """Generate position sizing recommendations based on CMRS score"""
+    if cmrs_score >= 75:
+        return {
+            "equity_target": "10-20%",
+            "cash_target": "80-90%",
+            "risk_level": "EXTREME",
+            "actions": [
+                "Liquidate high-beta, overvalued stocks",
+                "Move 80%+ to Treasury/money market funds",
+                "Maintain only core, dividend-paying holdings",
+            ]
+        }
+    elif cmrs_score >= 55:
+        return {
+            "equity_target": "30-50%",
+            "cash_target": "50-70%",
+            "risk_level": "HIGH",
+            "actions": [
+                "Lock in recent bull market gains",
+                "Pause equity contributions",
+                "Redirect new capital to short-duration bonds",
+            ]
+        }
+    elif cmrs_score >= 25:
+        return {
+            "equity_target": "50-70%",
+            "cash_target": "30-50%",
+            "risk_level": "MODERATE",
+            "actions": [
+                "Maintain normal strategic allocation",
+                "Continue regular dollar-cost averaging",
+                "Rebalance quarterly",
+            ]
+        }
+    else:
+        return {
+            "equity_target": "80-100%",
+            "cash_target": "0-20%",
+            "risk_level": "LOW",
+            "actions": [
+                "Market at historic lows - opportune time to accumulate",
+                "Increase equity allocations systematically",
+                "Convert cash reserves to equity ETFs",
+            ]
+        }
 
 
 def run_pipeline():
-    """主管道"""
+    """Main execution pipeline"""
     api_key = os.environ.get("FRED_API_KEY")
     if not api_key:
-        raise ValueError("❌ 错误：未检测到 FRED_API_KEY 环境变量！")
+        raise ValueError("ERROR: FRED_API_KEY environment variable not set!")
 
     fred = Fred(api_key=api_key)
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    print("=" * 70)
-    print("⏳ 正在拉取符合专业金融定义的标准底层数据...")
-    print("=" * 70)
+    print("\n" + "=" * 80)
+    print("CMRS RISK ASSESSMENT PIPELINE")
+    print("=" * 80)
 
     try:
-        # =====================================================================
-        # 1. Shiller CAPE 与 ERP
-        # =====================================================================
-        print("\n[1/4] 席勒市盈率 (CAPE) 与股权风险溢价 (ERP)")
-        print("-" * 70)
+        # Step 1: Fetch CAPE and ERP
+        print("\n[1/4] Shiller CAPE & Equity Risk Premium")
+        print("-" * 80)
         
-        cape_df = fetch_shiller_cape()
-        gs10_df = fetch_erp_and_gs10(fred)
+        cape_df = fetch_shiller_cape(start_year=1990)
+        gs10_df = fetch_gs10(fred, start_year=1990)
         
         if cape_df is None or gs10_df is None:
-            raise ValueError("❌ 无法获取 CAPE 或 GS10 数据")
+            raise ValueError("ERROR: Cannot fetch CAPE or GS10")
         
-        # 对齐月度频率
+        # Align to monthly
         df_cape_erp = pd.concat([cape_df, gs10_df], axis=1).resample("MS").first().ffill()
         
-        # 计算 ERP
-        # ERP = (E/P) - Rf ≈ (1/CAPE) - (GS10/100)
-        # 注意：这里假设 CAPE 基于正常化盈利，所以 1/CAPE 是合理的收益率代理
+        # Calculate ERP: (E/P) - Rf ≈ (1/CAPE) - (GS10/100)
         df_cape_erp["erp_raw"] = (1.0 / df_cape_erp["cape"]) - (df_cape_erp["gs10"] / 100.0)
         
-        print(f"  ✓ 最新 CAPE: {df_cape_erp['cape'].iloc[-1]:.2f} (10年历史均值基准)")
-        print(f"  ✓ 最新 GS10: {df_cape_erp['gs10'].iloc[-1]:.2f}%")
-        print(f"  ✓ 最新 ERP: {df_cape_erp['erp_raw'].iloc[-1]:.4f} ({df_cape_erp['erp_raw'].iloc[-1]*100:.2f}%)")
+        latest_cape = df_cape_erp["cape"].iloc[-1]
+        latest_gs10 = df_cape_erp["gs10"].iloc[-1]
+        latest_erp = df_cape_erp["erp_raw"].iloc[-1]
         
-        # =====================================================================
-        # 2. 巴菲特指标
-        # =====================================================================
-        print("\n[2/4] 巴菲特指标 (总市值/GDP)")
-        print("-" * 70)
+        print(f"  Latest CAPE: {latest_cape:.2f}")
+        print(f"  Latest GS10: {latest_gs10:.2f}%")
+        print(f"  Latest ERP: {latest_erp:.4f} ({latest_erp*100:.2f}%)")
         
-        buffett_df = fetch_buffett_index(fred)
+        # Step 2: Fetch Buffett Index
+        print("\n[2/4] Buffett Indicator (Market Cap/GDP)")
+        print("-" * 80)
+        
+        buffett_df = fetch_buffett_index(fred, start_year=1990)
         if buffett_df is None:
-            raise ValueError("❌ 无法获取巴菲特指标数据")
+            raise ValueError("ERROR: Cannot fetch Buffett Index")
         
-        print(f"  ✓ 最新巴菲特指标: {buffett_df['buffett_raw'].iloc[-1]:.4f} " +
-              f"({buffett_df['buffett_raw'].iloc[-1]*100:.2f}% 市值/GDP)")
+        latest_buffett = buffett_df["buffett_raw"].iloc[-1]
+        print(f"  Latest Buffett Index: {latest_buffett:.4f} ({latest_buffett*100:.2f}%)")
         
-        # =====================================================================
-        # 3. 保证金债务/GDP
-        # =====================================================================
-        print("\n[3/4] 保证金债务/GDP")
-        print("-" * 70)
+        # Step 3: Fetch Margin Debt
+        print("\n[3/4] Margin Debt / GDP")
+        print("-" * 80)
         
-        margin_df = fetch_margin_debt(fred)
+        margin_df = fetch_margin_debt(fred, start_year=1990)
         if margin_df is None:
-            raise ValueError("❌ 无法获取保证金债务数据")
+            raise ValueError("ERROR: Cannot fetch Margin Debt")
         
-        print(f"  ✓ 最新保证金债务/GDP: {margin_df['margin_debt_raw'].iloc[-1]:.4f} " +
-              f"({margin_df['margin_debt_raw'].iloc[-1]*100:.2f}%)")
+        latest_margin = margin_df["margin_debt_raw"].iloc[-1]
+        print(f"  Latest Margin/GDP: {latest_margin:.4f} ({latest_margin*100:.2f}%)")
         
-        # =====================================================================
-        # 4. 数据对齐与分位数计算
-        # =====================================================================
-        print("\n[4/4] 多因子风险评分 (CMRS)")
-        print("-" * 70)
+        # Step 4: Align data and calculate CMRS
+        print("\n[4/4] Multi-Factor Risk Score (CMRS)")
+        print("-" * 80)
         
-        # 统一到月度频率
         df_all = pd.concat([
             df_cape_erp[["cape", "erp_raw"]],
-            buffett_df[["buffett_raw"]].resample("MS").first().ffill(),
-            margin_df[["margin_debt_raw"]].resample("MS").first().ffill(),
+            buffett_df.resample("MS").first().ffill(),
+            margin_df.resample("MS").first().ffill(),
         ], axis=1).dropna()
         
-        latest = df_all.iloc[-1]
-        window_df = df_all.iloc[-120:]  # 最近 10 年窗口
+        results = calculate_risk_score(df_all)
         
-        # 计算各指标的分位数（百分比排名）
-        # 注意分位数方向的正确性：
-        # - ERP 越高越好（低风险），所以是 1 - percentile（反向）
-        # - CAPE 越低越好（便宜），所以是正向 percentile
-        # - Buffett 越低越好（便宜），所以是正向 percentile
-        # - Margin Debt 越低越好（低杠杆），所以是正向 percentile
+        cmrs_score = results["cmrs_score"]
+        risk_zone = get_risk_zone(cmrs_score)
         
-        erp_pct = 100.0 * (1.0 - (window_df["erp_raw"] <= latest["erp_raw"]).mean())  # 反向
-        cape_pct = 100.0 * (window_df["cape"] <= latest["cape"]).mean()  # 正向
-        buffett_pct = 100.0 * (window_df["buffett_raw"] <= latest["buffett_raw"]).mean()  # 正向
-        margin_pct = 100.0 * (window_df["margin_debt_raw"] <= latest["margin_debt_raw"]).mean()  # 正向
+        print(f"\n  ERP Percentile: {results['erp_pct']:.1f} (Weight: 35%)")
+        print(f"  CAPE Percentile: {results['cape_pct']:.1f} (Weight: 25%)")
+        print(f"  Buffett Percentile: {results['buffett_pct']:.1f} (Weight: 20%)")
+        print(f"  Margin Percentile: {results['margin_pct']:.1f} (Weight: 20%)")
+        print(f"\n  CMRS Score: {cmrs_score}")
+        print(f"  {risk_zone}")
         
-        # 加权综合评分（35/25/20/20）
-        # 分数越高 = 风险越高
-        cmrs_score = round(
-            0.35 * erp_pct + 0.25 * cape_pct + 0.20 * buffett_pct + 0.20 * margin_pct,
-            1,
-        )
-        current_zone = get_risk_zone(cmrs_score)
+        # Position recommendations
+        position_advice = get_position_advice(cmrs_score)
         
-        print(f"  📈 ERP 分位数: {erp_pct:.1f} (权重 35%)")
-        print(f"  📊 CAPE 分位数: {cape_pct:.1f} (权重 25%)")
-        print(f"  💰 Buffett 分位数: {buffett_pct:.1f} (权重 20%)")
-        print(f"  📉 Margin 分位数: {margin_pct:.1f} (权重 20%)")
-        print(f"\n  🎯 综合风险评分: {cmrs_score}")
-        print(f"  {current_zone}")
+        print(f"\n  Risk Level: {position_advice['risk_level']}")
+        print(f"  Target Equity: {position_advice['equity_target']}")
+        print(f"  Target Cash: {position_advice['cash_target']}")
+        print(f"\n  Recommended Actions:")
+        for action in position_advice['actions']:
+            print(f"    - {action}")
         
-        # =====================================================================
-        # 5. 生成仓位建议 (SOP)
-        # =====================================================================
-        if cmrs_score >= 75:
-            target_eq, target_cash = "10% - 20%", "80% - 90%"
-            steps = [
-                "清理所有高 Beta、高估值概念股，仅保留
+        # Build output JSON
+        output_data = {
+            "timestamp": today_str,
+            "cmrs_score": cmrs_score,
+            "risk_zone": risk_zone,
+            "indicators": {
+                "cape": {
+                    "value": float(latest_cape),
+                    "percentile": float(results['cape_pct']),
+                },
+                "erp": {
+                    "value": float(latest_erp),
+                    "percentile": float(results['erp_pct']),
+                },
+                "buffett": {
+                    "value": float(latest_buffett),
+                    "percentile": float(results['buffett_pct']),
+                },
+                "margin_debt": {
+                    "value": float(latest_margin),
+                    "percentile": float(results['margin_pct']),
+                },
+            },
+            "position_advice": position_advice,
+        }
+        
+        # Save to JSON
+        os.makedirs("data", exist_ok=True)
+        json_path = "data/latest_scores.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=2)
+        
+        print(f"\n✓ Results saved to {json_path}")
+        print("=" * 80)
+        
+        return output_data
+
+    except Exception as e:
+        print(f"\nERROR: Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
+if __name__ == "__main__":
+    result = run_pipeline()
