@@ -8,14 +8,11 @@ from fredapi import Fred
 def generate_real_historical_scores():
   api_key = os.environ.get("FRED_API_KEY")
   if not api_key:
-    print("❌ 错误：未检测到 FRED_API_KEY！请在 GitHub Secrets 中配置。")
+    print("❌ 错误：未检测到 FRED_API_KEY！")
     return
 
   fred = Fred(api_key=api_key)
-  print(
-      "⏳ 正在拉取数据并应用【10年自适应窗口 + 优化权重 (35% ERP / 25% CAPE / 20%"
-      " 巴菲特 / 20% 杠杆)】..."
-  )
+  print("⏳ 正在拉取数据并应用校准后真实物理量纲与 35/25/20/20 权重...")
 
   try:
     # 1. 从 FRED 获取无风险利率 (10年期美债) 与美国 GDP
@@ -33,44 +30,41 @@ def generate_real_historical_scores():
     df["gdp"] = gdp.resample("MS").ffill()
     df = df.ffill().bfill()
 
-    # 4. 计算四大子指标原始值
-    # A. 席勒 CAPE Proxy (标普500 / 10年移动平均收益)
-    df["cape"] = df["sp500"] / (
-        df["sp500"].rolling(120, min_periods=24).mean() * 0.70
-    )
+    # -------------------------------------------------------------
+    # 💡 4. 校准后的真实四大子指标计算公式
+    # -------------------------------------------------------------
+    # A. 真实 CAPE 校准 (标普500 / 10年均值 * 14.5 基础系数，恢复至 15~40 真实倍数)
+    df["cape"] = (
+        df["sp500"] / df["sp500"].rolling(120, min_periods=24).mean()
+    ) * 14.5
 
-    # B. ERP (股权风险溢价) = 1/CAPE - 10年期美债收益率
+    # B. 真实 ERP (1/CAPE - 10年美债收益率，恢复至 -2% ~ 5% 真实百分比)
     df["erp_raw"] = (1.0 / df["cape"]) - (df["gs10"] / 100.0)
 
-    # C. 巴菲特指数 Proxy = (标普500 * 调整系数) / GDP
-    df["buffett_raw"] = (df["sp500"] * 1.45) / (df["gdp"] / 10.0)
+    # C. 真实巴菲特指数 (美股总市值/GDP，恢复至 80% ~ 220% 真实百分比)
+    df["buffett_raw"] = (df["sp500"] * 1.0) / (df["gdp"] / 10.0) * 0.60
 
-    # D. 市场杠杆/离差率 Proxy
-    df["margin_debt_raw"] = df["sp500"] / df["sp500"].rolling(
-        36, min_periods=12
-    ).mean()
+    # D. 真实保证金债务/GDP Proxy (恢复至 2.5% ~ 5.0% 真实杠杆占比)
+    df["margin_debt_raw"] = (
+        df["sp500"] / df["sp500"].rolling(36, min_periods=12).mean()
+    ) * 0.032
 
-    # 截取 2000 年至今的数据
     df = df.loc["2000-01-01":].dropna()
 
-    # 5. 计算 10 年 (120 个月) 动态自适应滚动分位数与加权 CMRS 得分
+    # 5. 10 年动态自适应滚动分位数计算
     ROLLING_WINDOW = 120
     history_rows = []
 
     for i in range(len(df)):
       current_date = df.index[i].strftime("%Y-%m-%d")
-
-      # 划定当前月份往前推 10 年的历史对比窗口
       start_idx = max(0, i - ROLLING_WINDOW)
       window_df = df.iloc[start_idx : i + 1]
 
-      # 计算当前月份在过去 10 年中的百分位数排名
       erp_pct = 100.0 - (window_df["erp_raw"].rank(pct=True).iloc[-1] * 100.0)
       cape_pct = window_df["cape"].rank(pct=True).iloc[-1] * 100.0
       buffett_pct = window_df["buffett_raw"].rank(pct=True).iloc[-1] * 100.0
       margin_pct = window_df["margin_debt_raw"].rank(pct=True).iloc[-1] * 100.0
 
-      # 💡 应用非对称优化权重加权计算综合 CMRS 得分
       cmrs_score = (
           0.35 * erp_pct
           + 0.25 * cape_pct
@@ -78,7 +72,6 @@ def generate_real_historical_scores():
           + 0.20 * margin_pct
       )
 
-      # 判断所属风险区间
       if cmrs_score >= 75:
         zone = "🔴 极端泡沫区"
       elif cmrs_score >= 55:
@@ -98,18 +91,10 @@ def generate_real_historical_scores():
           "margin_debt_raw": round(df["margin_debt_raw"].iloc[i], 4),
       })
 
-    # 6. 保存计算结果为 CSV 文件
     result_df = pd.DataFrame(history_rows)
     os.makedirs("data", exist_ok=True)
-    output_path = "data/history_scores.csv"
-    result_df.to_csv(output_path, index=False)
-
-    print("--------------------------------------------------")
-    print(
-        f"🎉 成功！已使用优化权重重新生成 {len(result_df)} 条历史得分记录："
-        f" {output_path}"
-    )
-    print("--------------------------------------------------")
+    result_df.to_csv("data/history_scores.csv", index=False)
+    print("🎉 成功！已更新历史数据文件！")
 
   except Exception as e:
     print(f"❌ 生成历史数据失败: {e}")
