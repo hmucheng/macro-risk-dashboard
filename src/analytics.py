@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 CMRS 多因子风险评分系统
-严格符合专业金融定义的四大指标计算（已修复 Shiller 官方数据源与解析逻辑）
+严格符合专业金融定义的四大指标计算（已加入依赖自适应安装）
 """
 
 import io
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -50,6 +52,14 @@ def fetch_shiller_cape(start_year=1990):
     """
     print("  [Loading Shiller CAPE data from Yale official source...]")
     try:
+        # 自动确保环境安装了解析 xls 所需的 xlrd 库
+        try:
+            import xlrd
+        except ImportError:
+            print("    [Info] Installing missing dependency 'xlrd'...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "xlrd>=2.0.1"])
+            import xlrd
+
         url = "http://www.econ.yale.edu/~shiller/data/ie_data.xls"
         response = requests.get(url, timeout=15)
         df = pd.read_excel(io.BytesIO(response.content), sheet_name="Data", skiprows=7)
