@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CMRS 多因子风险评分系统
-严格符合专业金融定义的四大指标计算
+严格符合专业金融定义的四大指标计算（修复数据源与对齐逻辑）
 """
 
 import json
@@ -45,29 +45,32 @@ def get_risk_zone(score):
 
 def fetch_shiller_cape(start_year=1990):
     """
-    Fetch Shiller CAPE data from official source
-    Returns: Monthly DataFrame with CAPE values
+    Fetch Shiller CAPE data from official derived monthly dataset
     """
     print("  [Loading Shiller CAPE data...]")
     try:
-        url = "https://raw.githubusercontent.com/datasets/s-and-p-500/master/data/data.csv"
+        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-derived/master/data/monthly.csv"
         df = pd.read_csv(url)
         df["Date"] = pd.to_datetime(df["Date"])
         df = df[df["Date"].dt.year >= start_year].copy()
         df = df.sort_values("Date").set_index("Date")
         
-        # Find CAPE column (may have different names)
         cape_col = None
         for col in df.columns:
-            if "CAPE" in col.upper() or "PE10" in col.upper():
+            if "CAPE" in col.upper() or "CYCLICALLY" in col.upper() or "PE10" in col.upper():
                 cape_col = col
                 break
         
         if cape_col is None:
-            print("    WARNING: CAPE column not found in Shiller data")
-            return None
+            # Fallback to standard column name check
+            for col in df.columns:
+                if "price" in col.lower() or "earnings" in col.lower():
+                    pass
+            raise ValueError("CAPE column not found in dataset")
         
-        return df[[cape_col]].rename(columns={cape_col: "cape"})
+        # Resample to monthly start and forward fill
+        res_df = df[[cape_col]].rename(columns={cape_col: "cape"})
+        return res_df.resample("MS").first().ffill()
     
     except Exception as e:
         print(f"    ERROR: Failed to load Shiller CAPE: {e}")
@@ -77,14 +80,13 @@ def fetch_shiller_cape(start_year=1990):
 def fetch_gs10(fred, start_year=1990):
     """
     Fetch 10-year Treasury yield (GS10) from FRED
-    Returns: Monthly DataFrame with GS10 values
     """
     print("  [Loading GS10 (10Y Treasury) data...]")
     try:
         gs10 = fred.get_series("GS10", observation_start=f"{start_year}-01-01")
         gs10_df = pd.DataFrame({"gs10": gs10})
         gs10_df.index.name = "Date"
-        return gs10_df
+        return gs10_df.resample("MS").first().ffill()
     except Exception as e:
         print(f"    ERROR: Failed to load GS10: {e}")
         return None
@@ -93,40 +95,21 @@ def fetch_gs10(fred, start_year=1990):
 def fetch_buffett_index(fred, start_year=1990):
     """
     Calculate Buffett Indicator = Total Market Cap / Nominal GDP
-    Uses Federal Reserve Z.1 stock market value
     """
     print("  [Loading Buffett Index (Market Cap/GDP)...]")
     try:
         start_str = f"{start_year}-01-01"
-        
-        # Get nominal GDP (quarterly, billions of dollars)
         gdp = fred.get_series("GDP", observation_start=start_str)
+        market_cap = fred.get_series("BOGZ1FL893064105Q", observation_start=start_str) / 1000.0
         
-        # Get stock market value from Federal Reserve Z.1
-        # BOGZ1FL893064105Q: Total equity market value (quarterly, millions)
-        try:
-            market_cap = fred.get_series(
-                "BOGZ1FL893064105Q", observation_start=start_str
-            )
-            market_cap = market_cap / 1000.0  # Convert to billions
-            print("    [Using BOGZ1FL893064105Q - Federal Reserve Z.1 stock value]")
-        except:
-            print("    WARNING: Cannot fetch market cap from FRED")
-            return None
-        
-        # Align to quarterly frequency (GDP is quarterly)
         df = pd.DataFrame({
             "market_cap": market_cap,
             "gdp": gdp
         })
-        df = df.resample("QS").first().ffill()
-        df = df.dropna()
-        
-        # Calculate ratio (no extra coefficients)
+        # Resample to monthly, forward fill quarterly reporting lag to current month
+        df = df.resample("MS").first().ffill()
         df["buffett_raw"] = df["market_cap"] / df["gdp"]
-        
         return df[["buffett_raw"]]
-    
     except Exception as e:
         print(f"    ERROR: Failed to load Buffett Index: {e}")
         return None
@@ -135,40 +118,20 @@ def fetch_buffett_index(fred, start_year=1990):
 def fetch_margin_debt(fred, start_year=1990):
     """
     Calculate Margin Debt / GDP
-    Uses Federal Reserve Z.1 broker-dealer credit data
     """
     print("  [Loading Margin Debt/GDP...]")
     try:
         start_str = f"{start_year}-01-01"
-        
-        # Get GDP
         gdp = fred.get_series("GDP", observation_start=start_str)
+        margin_debt = fred.get_series("BOGZ1FL663067003Q", observation_start=start_str) / 1000.0
         
-        # Get margin debt: BOGZ1FL663067003Q
-        # Broker-Dealer Credit (quarterly, millions)
-        try:
-            margin_debt = fred.get_series(
-                "BOGZ1FL663067003Q", observation_start=start_str
-            )
-            margin_debt = margin_debt / 1000.0  # Convert to billions
-            print("    [Using BOGZ1FL663067003Q - Fed Z.1 Broker-Dealer Credit]")
-        except:
-            print("    WARNING: Cannot fetch margin debt from FRED")
-            return None
-        
-        # Align to quarterly
         df = pd.DataFrame({
             "margin_debt": margin_debt,
             "gdp": gdp
         })
-        df = df.resample("QS").first().ffill()
-        df = df.dropna()
-        
-        # Calculate ratio
+        df = df.resample("MS").first().ffill()
         df["margin_debt_raw"] = df["margin_debt"] / df["gdp"]
-        
         return df[["margin_debt_raw"]]
-    
     except Exception as e:
         print(f"    ERROR: Failed to load margin debt: {e}")
         return None
@@ -177,31 +140,15 @@ def fetch_margin_debt(fred, start_year=1990):
 def calculate_risk_score(df_all):
     """
     Calculate CMRS (Comprehensive Market Risk Score)
-    
-    Methodology:
-    - Calculate 10-year rolling percentile for each indicator
-    - Weight: ERP(35%) + CAPE(25%) + Buffett(20%) + Margin(20%)
-    - Higher score = Higher risk
     """
     latest = df_all.iloc[-1]
     window = df_all.iloc[-120:]  # 10-year rolling window
     
-    # Percentile calculations
-    # NOTE: Direction matters for interpretation
-    
-    # ERP: Higher ERP = Lower risk, so REVERSE percentile
     erp_pct = 100.0 * (1.0 - (window["erp_raw"] <= latest["erp_raw"]).mean())
-    
-    # CAPE: Higher CAPE = Higher risk, so NORMAL percentile
     cape_pct = 100.0 * (window["cape"] <= latest["cape"]).mean()
-    
-    # Buffett: Higher ratio = Higher risk, so NORMAL percentile
     buffett_pct = 100.0 * (window["buffett_raw"] <= latest["buffett_raw"]).mean()
-    
-    # Margin Debt: Higher margin = Higher risk, so NORMAL percentile
     margin_pct = 100.0 * (window["margin_debt_raw"] <= latest["margin_debt_raw"]).mean()
     
-    # Weighted score
     cmrs_score = round(
         0.35 * erp_pct + 0.25 * cape_pct + 0.20 * buffett_pct + 0.20 * margin_pct,
         1,
@@ -218,7 +165,6 @@ def calculate_risk_score(df_all):
 
 
 def get_position_advice(cmrs_score):
-    """Generate position sizing recommendations based on CMRS score"""
     if cmrs_score >= 75:
         return {
             "equity_target": "10-20%",
@@ -266,7 +212,6 @@ def get_position_advice(cmrs_score):
 
 
 def run_pipeline():
-    """Main execution pipeline"""
     api_key = os.environ.get("FRED_API_KEY")
     if not api_key:
         raise ValueError("ERROR: FRED_API_KEY environment variable not set!")
@@ -279,85 +224,47 @@ def run_pipeline():
     print("=" * 80)
 
     try:
-        # Step 1: Fetch CAPE and ERP
-        print("\n[1/4] Shiller CAPE & Equity Risk Premium")
-        print("-" * 80)
-        
         cape_df = fetch_shiller_cape(start_year=1990)
         gs10_df = fetch_gs10(fred, start_year=1990)
+        buffett_df = fetch_buffett_index(fred, start_year=1990)
+        margin_df = fetch_margin_debt(fred, start_year=1990)
         
-        if cape_df is None or gs10_df is None:
-            raise ValueError("ERROR: Cannot fetch CAPE or GS10")
+        if cape_df is None or gs10_df is None or buffett_df is None or margin_df is None:
+            raise ValueError("ERROR: One or more data series failed to load.")
         
-        # Align to monthly
-        df_cape_erp = pd.concat([cape_df, gs10_df], axis=1).resample("MS").first().ffill()
+        # Combine all dataframes on monthly index and forward fill trailing macro lags
+        df_all = pd.concat([
+            cape_df,
+            gs10_df,
+            buffett_df,
+            margin_df,
+        ], axis=1).ffill().dropna()
         
-        # Calculate ERP: (E/P) - Rf ≈ (1/CAPE) - (GS10/100)
-        df_cape_erp["erp_raw"] = (1.0 / df_cape_erp["cape"]) - (df_cape_erp["gs10"] / 100.0)
+        # Calculate ERP: (1/CAPE) - (GS10/100)
+        df_all["erp_raw"] = (1.0 / df_all["cape"]) - (df_all["gs10"] / 100.0)
         
-        latest_cape = df_cape_erp["cape"].iloc[-1]
-        latest_gs10 = df_cape_erp["gs10"].iloc[-1]
-        latest_erp = df_cape_erp["erp_raw"].iloc[-1]
+        latest = df_all.iloc[-1]
+        latest_cape = latest["cape"]
+        latest_gs10 = latest["gs10"]
+        latest_erp = latest["erp_raw"]
+        latest_buffett = latest["buffett_raw"]
+        latest_margin = latest["margin_debt_raw"]
         
         print(f"  Latest CAPE: {latest_cape:.2f}")
         print(f"  Latest GS10: {latest_gs10:.2f}%")
         print(f"  Latest ERP: {latest_erp:.4f} ({latest_erp*100:.2f}%)")
-        
-        # Step 2: Fetch Buffett Index
-        print("\n[2/4] Buffett Indicator (Market Cap/GDP)")
-        print("-" * 80)
-        
-        buffett_df = fetch_buffett_index(fred, start_year=1990)
-        if buffett_df is None:
-            raise ValueError("ERROR: Cannot fetch Buffett Index")
-        
-        latest_buffett = buffett_df["buffett_raw"].iloc[-1]
         print(f"  Latest Buffett Index: {latest_buffett:.4f} ({latest_buffett*100:.2f}%)")
-        
-        # Step 3: Fetch Margin Debt
-        print("\n[3/4] Margin Debt / GDP")
-        print("-" * 80)
-        
-        margin_df = fetch_margin_debt(fred, start_year=1990)
-        if margin_df is None:
-            raise ValueError("ERROR: Cannot fetch Margin Debt")
-        
-        latest_margin = margin_df["margin_debt_raw"].iloc[-1]
         print(f"  Latest Margin/GDP: {latest_margin:.4f} ({latest_margin*100:.2f}%)")
         
-        # Step 4: Align data and calculate CMRS
-        print("\n[4/4] Multi-Factor Risk Score (CMRS)")
-        print("-" * 80)
-        
-        df_all = pd.concat([
-            df_cape_erp[["cape", "erp_raw"]],
-            buffett_df.resample("MS").first().ffill(),
-            margin_df.resample("MS").first().ffill(),
-        ], axis=1).dropna()
-        
         results = calculate_risk_score(df_all)
-        
         cmrs_score = results["cmrs_score"]
         risk_zone = get_risk_zone(cmrs_score)
         
-        print(f"\n  ERP Percentile: {results['erp_pct']:.1f} (Weight: 35%)")
-        print(f"  CAPE Percentile: {results['cape_pct']:.1f} (Weight: 25%)")
-        print(f"  Buffett Percentile: {results['buffett_pct']:.1f} (Weight: 20%)")
-        print(f"  Margin Percentile: {results['margin_pct']:.1f} (Weight: 20%)")
         print(f"\n  CMRS Score: {cmrs_score}")
         print(f"  {risk_zone}")
         
-        # Position recommendations
         position_advice = get_position_advice(cmrs_score)
         
-        print(f"\n  Risk Level: {position_advice['risk_level']}")
-        print(f"  Target Equity: {position_advice['equity_target']}")
-        print(f"  Target Cash: {position_advice['cash_target']}")
-        print(f"\n  Recommended Actions:")
-        for action in position_advice['actions']:
-            print(f"    - {action}")
-        
-        # Build output JSON
         output_data = {
             "timestamp": today_str,
             "cmrs_score": cmrs_score,
@@ -383,7 +290,6 @@ def run_pipeline():
             "position_advice": position_advice,
         }
         
-        # Save to JSON
         os.makedirs("data", exist_ok=True)
         json_path = "data/latest_scores.json"
         with open(json_path, "w", encoding="utf-8") as f:
