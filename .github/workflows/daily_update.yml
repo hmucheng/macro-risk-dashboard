@@ -5,7 +5,6 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
-# 显式声明赋予 Actions 写入代码仓库的权限
 permissions:
   contents: write
 
@@ -15,10 +14,12 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4  # 升级至 v4
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 拉取完整历史，确保 rebase 不会冲突
 
     - name: Set up Python
-      uses: actions/setup-python@v5  # 升级至 v5
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
@@ -39,5 +40,5 @@ jobs:
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git add data/latest_scores.json
         git commit -m "Auto-update: macro risk indicators [skip ci]" || exit 0
-        git pull --rebase origin main
-        git push
+        git pull --rebase origin main || git rebase --skip
+        git push origin main
