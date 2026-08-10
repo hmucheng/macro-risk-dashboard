@@ -1,23 +1,23 @@
 {
   "timestamp": "2026-08-10",
-  "cmrs_score": 82.4,
+  "cmrs_score": 95.7,
   "risk_zone": "🔴 极端泡沫区",
   "indicators": {
     "erp": {
-      "raw_value": -0.01,
-      "percentile_score": 95.2
+      "raw_value": 0.3271,
+      "percentile_score": 98.3
     },
     "cape": {
-      "raw_value": 41.2,
-      "percentile_score": 96.1
+      "raw_value": 2.68,
+      "percentile_score": 95.8
     },
     "buffett": {
-      "raw_value": 2.2,
-      "percentile_score": 92.0
+      "raw_value": 3.46,
+      "percentile_score": 100.0
     },
     "margin_debt": {
-      "raw_value": 0.05,
-      "percentile_score": 94.5
+      "raw_value": 1.2891,
+      "percentile_score": 86.7
     }
   },
   "sop_instructions": {
@@ -26,7 +26,7 @@
     "execution_steps": [
       "清理所有高 Beta、高估值概念股，仅保留极少量高股息核心底仓。",
       "80%+ 资金归避风港 (1-3个月美债)，享受高息同时锁定子弹。",
-      "市场宽度已突破 50%，一票否决强行将权益仓位削减至 10%-20% 极限位。"
+      "一票否决强行将权益仓位削减至 10%-20% 极限避险位。"
     ]
   }
 }
