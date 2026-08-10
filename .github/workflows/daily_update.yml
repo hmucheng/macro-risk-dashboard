@@ -2,9 +2,12 @@ name: Daily Macro Risk Update
 
 on:
   schedule:
-    # 每天 UTC 时间 0:00 (北京时间早 8:00) 自动运行
     - cron: '0 0 * * *'
-  workflow_dispatch: # 支持在 GitHub 界面手动触发
+  workflow_dispatch:
+
+# 显式声明赋予 Actions 写入代码仓库的权限
+permissions:
+  contents: write
 
 jobs:
   update-data:
@@ -12,10 +15,10 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4  # 升级至 v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5  # 升级至 v5
       with:
         python-version: '3.10'
 
