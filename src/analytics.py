@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 CMRS 多因子风险评分系统
-严格符合专业金融定义的四大指标计算（修复数据源与对齐逻辑）
+严格符合专业金融定义的四大指标计算（已修复 Shiller 官方数据源与解析逻辑）
 """
 
+import io
 import json
 import os
 from datetime import datetime
@@ -45,32 +46,54 @@ def get_risk_zone(score):
 
 def fetch_shiller_cape(start_year=1990):
     """
-    Fetch Shiller CAPE data from official derived monthly dataset
+    Fetch Shiller CAPE data directly from Robert Shiller's official Yale dataset
     """
-    print("  [Loading Shiller CAPE data...]")
+    print("  [Loading Shiller CAPE data from Yale official source...]")
     try:
-        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-derived/master/data/monthly.csv"
-        df = pd.read_csv(url)
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df[df["Date"].dt.year >= start_year].copy()
-        df = df.sort_values("Date").set_index("Date")
+        url = "http://www.econ.yale.edu/~shiller/data/ie_data.xls"
+        response = requests.get(url, timeout=15)
+        df = pd.read_excel(io.BytesIO(response.content), sheet_name="Data", skiprows=7)
         
+        # Clean column names
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        date_col = df.columns[0]
         cape_col = None
         for col in df.columns:
-            if "CAPE" in col.upper() or "CYCLICALLY" in col.upper() or "PE10" in col.upper():
+            if "CAPE" in col.upper() or "P/E10" in col.upper():
                 cape_col = col
                 break
         
         if cape_col is None:
-            # Fallback to standard column name check
-            for col in df.columns:
-                if "price" in col.lower() or "earnings" in col.lower():
-                    pass
-            raise ValueError("CAPE column not found in dataset")
+            cape_col = "CAPE"
+            
+        df = df[[date_col, cape_col]].dropna(subset=[date_col]).copy()
+        df.columns = ["raw_date", "cape"]
         
-        # Resample to monthly start and forward fill
-        res_df = df[[cape_col]].rename(columns={cape_col: "cape"})
-        return res_df.resample("MS").first().ffill()
+        def parse_shiller_date(val):
+            try:
+                val_str = str(val).strip()
+                if "." in val_str:
+                    parts = val_str.split(".")
+                    year = int(parts[0])
+                    month = int(parts[1].ljust(2, '0')[:2])
+                    if month < 1: month = 1
+                    if month > 12: month = 12
+                    return pd.Timestamp(year=year, month=month, day=1)
+                else:
+                    return pd.NaT
+            except:
+                return pd.NaT
+
+        df["Date"] = df["raw_date"].apply(parse_shiller_date)
+        df = df.dropna(subset=["Date"])
+        df["cape"] = pd.to_numeric(df["cape"], errors="coerce")
+        df = df.dropna(subset=["cape"])
+        
+        df = df[df["Date"].dt.year >= start_year].copy()
+        df = df.sort_values("Date").set_index("Date")
+        
+        return df[["cape"]].resample("MS").first().ffill()
     
     except Exception as e:
         print(f"    ERROR: Failed to load Shiller CAPE: {e}")
@@ -106,7 +129,6 @@ def fetch_buffett_index(fred, start_year=1990):
             "market_cap": market_cap,
             "gdp": gdp
         })
-        # Resample to monthly, forward fill quarterly reporting lag to current month
         df = df.resample("MS").first().ffill()
         df["buffett_raw"] = df["market_cap"] / df["gdp"]
         return df[["buffett_raw"]]
@@ -232,7 +254,6 @@ def run_pipeline():
         if cape_df is None or gs10_df is None or buffett_df is None or margin_df is None:
             raise ValueError("ERROR: One or more data series failed to load.")
         
-        # Combine all dataframes on monthly index and forward fill trailing macro lags
         df_all = pd.concat([
             cape_df,
             gs10_df,
@@ -240,7 +261,6 @@ def run_pipeline():
             margin_df,
         ], axis=1).ffill().dropna()
         
-        # Calculate ERP: (1/CAPE) - (GS10/100)
         df_all["erp_raw"] = (1.0 / df_all["cape"]) - (df_all["gs10"] / 100.0)
         
         latest = df_all.iloc[-1]
