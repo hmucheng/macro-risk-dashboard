@@ -1,15 +1,15 @@
 {
   "timestamp": "2026-08-10",
-  "cmrs_score": 41.5,
-  "risk_zone": "BLUE: Reasonable Holding Zone",
+  "cmrs_score": 86.6,
+  "risk_zone": "RED: Extreme Bubble Zone",
   "indicators": {
     "cape": {
-      "value": 0.0,
-      "percentile": 25.833333333333336
+      "value": 30.810960610791547,
+      "percentile": 70.0
     },
     "erp": {
-      "value": Infinity,
-      "percentile": 0.0
+      "value": -0.01354401744781207,
+      "percentile": 97.5
     },
     "buffett": {
       "value": 3.2915254743541307,
@@ -21,13 +21,13 @@
     }
   },
   "position_advice": {
-    "equity_target": "50-70%",
-    "cash_target": "30-50%",
-    "risk_level": "MODERATE",
+    "equity_target": "10-20%",
+    "cash_target": "80-90%",
+    "risk_level": "EXTREME",
     "actions": [
-      "Maintain normal strategic allocation",
-      "Continue regular dollar-cost averaging",
-      "Rebalance quarterly"
+      "Liquidate high-beta, overvalued stocks",
+      "Move 80%+ to Treasury/money market funds",
+      "Maintain only core, dividend-paying holdings"
     ]
   }
 }
