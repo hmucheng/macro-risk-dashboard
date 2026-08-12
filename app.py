@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime
 import io
 import requests
@@ -13,7 +12,7 @@ import requests
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="宏观大周期交易决策系统",
-    page_icon="📈",
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -23,28 +22,23 @@ st.caption("真实数据驱动：Yale Shiller | 美联储 FRED | Yahoo Finance")
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 1. 真实数据抓取模块 (带缓存与真实性严格校验)
+# 1. 真实数据抓取模块 (增强容错与列名归一化)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=86400) # 缓存24小时
 def fetch_shiller_cape():
     """从耶鲁大学官网直接读取 Shiller CAPE 官方 Excel 文件"""
     url = "http://www.econ.yale.edu/~shiller/data/ie_data.xls"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers, timeout=15)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    response = requests.get(url, headers=headers, timeout=20)
     
     if response.status_code != 200:
         raise ValueError(f"无法连接耶鲁大学数据源 (HTTP {response.status_code})")
         
-    # 读取 Excel
     excel_file = io.BytesIO(response.content)
     df = pd.read_excel(excel_file, sheet_name="Data", skiprows=7)
-    
-    # 清洗列名与无效行
-    # 第0列: Date, 第1列: P, 第10列: CAPE
     df = df.dropna(subset=[df.columns[0]]).copy()
     
-    # 过滤非数字行
     valid_rows = []
     for idx, row in df.iterrows():
         try:
@@ -58,19 +52,42 @@ def fetch_shiller_cape():
     if res_df.empty:
         raise ValueError("耶鲁 CAPE 数据解析为空，数据源结构可能发生变动。")
         
-    return res_df.iloc[-1]['CAPE'], res_df
+    return float(res_df.iloc[-1]['CAPE']), res_df
+
 
 @st.cache_data(ttl=86400)
 def fetch_fred_series(series_id):
-    """直接从美联储 FRED 官方 CSV 接口抓取数据"""
+    """直接从美联储 FRED 抓取 CSV 并强制归一化列名"""
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-    df = pd.read_csv(url)
-    df['DATE'] = pd.to_datetime(df['DATE'])
-    df[series_id] = pd.to_numeric(df[series_id], errors='coerce')
-    df = df.dropna().sort_values('DATE')
-    if df.empty:
-        raise ValueError(f"FRED 数据集 {series_id} 为空或获取失败。")
-    return df
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    res = requests.get(url, headers=headers, timeout=20)
+    if res.status_code != 200:
+        raise ValueError(f"无法获取 FRED 数据集 [{series_id}]，状态码: HTTP {res.status_code}")
+        
+    df = pd.read_csv(io.StringIO(res.text))
+    
+    # 强制将所有列名转换为去除空格的大写字母，解决 date 与 DATE 不匹配问题
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    
+    if 'DATE' not in df.columns:
+        raise ValueError(f"FRED 数据集 [{series_id}] 响应中缺失 DATE 列，收到的列为: {list(df.columns)}")
+        
+    df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+    
+    # 获取数值列（排除 DATE 之外的列）
+    val_cols = [c for c in df.columns if c != 'DATE']
+    if not val_cols:
+        raise ValueError(f"FRED 数据集 [{series_id}] 未找到有效数值列。")
+        
+    target_col = val_cols[0]
+    df[target_col] = pd.to_numeric(df[target_col], errors='coerce')
+    
+    df = df.dropna(subset=['DATE', target_col]).sort_values('DATE').reset_index(drop=True)
+    df = df.rename(columns={target_col: series_id})
+    
+    return df[['DATE', series_id]]
+
 
 @st.cache_data(ttl=3600)
 def fetch_sp500_technical():
@@ -78,51 +95,52 @@ def fetch_sp500_technical():
     ticker = yf.Ticker("^GSPC")
     hist = ticker.history(period="2y")
     if hist.empty:
-        raise ValueError("Yahoo Finance 标普500数据获取失败。")
+        raise ValueError("Yahoo Finance 标普500行情获取失败。")
         
-    hist['200MA'] = hist['Close'].rolling(window=200).mean()
-    latest_price = hist['Close'].iloc[-1]
-    ma200 = hist['200MA'].iloc[-1]
+    close_series = hist['Close']
+    if isinstance(close_series, pd.DataFrame):
+        close_series = close_series.iloc[:, 0]
+        
+    ma200 = close_series.rolling(window=200).mean()
+    latest_price = float(close_series.iloc[-1])
+    ma200_val = float(ma200.dropna().iloc[-1])
     
-    # 计算 3 个月动量
-    price_3m_ago = hist['Close'].iloc[-63] if len(hist) >= 63 else hist['Close'].iloc[0]
+    price_3m_ago = float(close_series.iloc[-63]) if len(close_series) >= 63 else float(close_series.iloc[0])
     momentum_3m = (latest_price - price_3m_ago) / price_3m_ago
     
-    return latest_price, ma200, momentum_3m, hist
+    plot_df = pd.DataFrame({'Close': close_series, '200MA': ma200})
+    return latest_price, ma200_val, momentum_3m, plot_df
 
 # -----------------------------------------------------------------------------
-# 2. 数据加载与集成测试
+# 2. 数据加载与决策计算
 # -----------------------------------------------------------------------------
 
-with st.spinner('正在从耶鲁大学、美联储与 Yahoo Finance 加载真实数据...'):
+with st.spinner('正在从耶鲁大学、美联储与 Yahoo Finance 安全同步数据...'):
     data_error = False
     try:
-        # A. 获取 CAPE
+        # A. CAPE
         current_cape, cape_history_df = fetch_shiller_cape()
         
-        # B. 获取 10年期美债收益率 (DGS10)
+        # B. 10年期美债收益率
         df_10y = fetch_fred_series("DGS10")
-        current_10y_yield = df_10y['DGS10'].iloc[-1]
+        current_10y_yield = float(df_10y['DGS10'].iloc[-1])
         
-        # C. 获取 GDP (名义 GDP, 季度)
+        # C. 名义 GDP
         df_gdp = fetch_fred_series("GDP")
-        latest_gdp = df_gdp['GDP'].iloc[-1] # 单位: 十亿美元
+        latest_gdp = float(df_gdp['GDP'].iloc[-1])
         
-        # D. 获取美股总市值 (Wilshire 5000 Price Index)
+        # D. 美股总市值指数 (Wilshire 5000)
         df_w5k = fetch_fred_series("WILL5000PRFC")
-        latest_w5k = df_w5k['WILL5000PRFC'].iloc[-1]
         
-        # E. 获取技术面与 S&P 500
+        # E. 技术面数据
         sp500_price, sp500_200ma, momentum_3m, sp500_hist = fetch_sp500_technical()
         
-        # F. 计算巴菲特指数 (粗略锚定估算: Wilshire5000 与 GDP 比值)
-        # 注：Wilshire 5000 指数值与 GDP 的比例用于计算历史分位
-        df_buffett = pd.merge_asof(df_w5k, df_gdp, on='DATE')
+        # F. 巴菲特指数计算
+        df_buffett = pd.merge_asof(df_w5k.sort_values('DATE'), df_gdp.sort_values('DATE'), on='DATE')
         df_buffett['Ratio'] = df_buffett['WILL5000PRFC'] / df_buffett['GDP']
-        current_buffett_ratio = df_buffett['Ratio'].dropna().iloc[-1]
+        current_buffett_ratio = float(df_buffett['Ratio'].dropna().iloc[-1])
         
-        # G. 估算 ERP (Implied ERP = 标普500盈利收益率 E/P - 10年美债收益率)
-        # E/P 暂取 1 / CAPE 或 历史估算
+        # G. 隐含 ERP 计算
         earnings_yield = (1.0 / current_cape) * 100
         current_erp = earnings_yield - current_10y_yield
         
@@ -132,40 +150,31 @@ with st.spinner('正在从耶鲁大学、美联储与 Yahoo Finance 加载真实
 
 if not data_error:
     # -----------------------------------------------------------------------------
-    # 3. 归一化与归因风险评分算法 (带有防历史漂移的 30年 Rolling Percentile)
+    # 3. 风险评分与决策逻辑
     # -----------------------------------------------------------------------------
     
-    # 1. CAPE 评分 (越偏向历史高位风险越高)
+    # 1. CAPE 分位数
     cape_series = cape_history_df['CAPE'].dropna()
-    cape_percentile = (cape_series < current_cape).mean() * 100
+    cape_percentile = float((cape_series < current_cape).mean() * 100)
     cape_score = cape_percentile
     
-    # 2. ERP 评分 (低 ERP = 高风险, 反向归一化)
-    # 设定 ERP 历史基准范围: 0% 为极端风险(100分), 5.5% 为低风险(0分)
+    # 2. ERP 评分
     erp_score = max(0.0, min(100.0, (5.5 - current_erp) / 5.5 * 100))
     
-    # 3. 巴菲特指数评分 (基于历史分位数)
+    # 3. 巴菲特指数分位数
     buffett_series = df_buffett['Ratio'].dropna()
-    buffett_percentile = (buffett_series < current_buffett_ratio).mean() * 100
+    buffett_percentile = float((buffett_series < current_buffett_ratio).mean() * 100)
     buffett_score = buffett_percentile
     
-    # 4. 融资杠杆率评分 (取固定或历史分位，此处默认基于中间分位)
-    margin_score = 65.0  # 默认设置为基准分位 (由于FINRA数据源无公开实时API，保持保守估计)
+    # 4. 融资杠杆率 (默认基准分位)
+    margin_score = 65.0 
 
-    # -----------------------------------------------------------------------------
-    # 4. 指标冲突解决机制与综合评分计算
-    # -----------------------------------------------------------------------------
-    
-    # 初始权重: CAPE 30%, ERP 35%, Buffett 25%, Margin 10%
+    # 动态权重与冲突解决
     w_cape, w_erp, w_buffett, w_margin = 0.30, 0.35, 0.25, 0.10
-    
-    # 冲突解决机制: 如果 CAPE 与 ERP 出现重大分歧 (>20分)
     if abs(cape_score - erp_score) > 20:
         if cape_score > erp_score:
-            # 估值极贵但 ERP 相对好 -> 提高 CAPE 权重
             w_cape, w_erp = 0.35, 0.30
         else:
-            # ERP 警告极度严重 -> 提高 ERP 权重
             w_cape, w_erp = 0.25, 0.40
 
     valuation_risk_score = (
@@ -175,18 +184,14 @@ if not data_error:
         margin_score * w_margin
     )
 
-    # -----------------------------------------------------------------------------
-    # 5. 仓位映射与三元微调规则
-    # -----------------------------------------------------------------------------
-    
-    # 基础仓位公式
+    # 仓位计算与微调
     base_allocation = max(10.0, min(95.0, 95.0 - (valuation_risk_score * 0.90)))
     
-    # 1. 技术面微调 (±10%)
+    # 技术面信号
     technical_adj = 0.0
     if sp500_price < sp500_200ma * 0.95:
-        technical_adj = -0.10 # 破位大跌模式
-        tech_signal = "⚠️ 价格严重低于200日线 (-10%)"
+        technical_adj = -0.10
+        tech_signal = "⚠️ 价格严重破位，低于200日线 5% 以上 (-10%)"
     elif sp500_price < sp500_200ma:
         technical_adj = -0.05
         tech_signal = "⚠️ 价格处于200日线下方 (-5%)"
@@ -196,52 +201,42 @@ if not data_error:
     else:
         tech_signal = "➡️ 技术面中性 (0%)"
         
-    # **【核心修正：极度低估优先覆盖规则 (Bottom Priority Rule)】**
+    # 底部优先保护规则
     if valuation_risk_score < 30.0:
-        # 当极度便宜时，屏蔽技术面的负向惩罚，防止在底部不敢建仓
         if technical_adj < 0:
             technical_adj = 0.0
             tech_signal += " [已激活底部优先规则，屏蔽技术面扣分]"
 
-    # 2. 宏观周期微调 (±5%)
-    macro_adj = 0.0
-    if current_10y_yield > 4.5:
-        macro_adj = -0.03
-        macro_signal = "⚠️ 处于高利率环境 (-3%)"
-    else:
-        macro_signal = "➡️ 宏观利率中性 (0%)"
+    # 宏观与动量调整
+    macro_adj = -0.03 if current_10y_yield > 4.5 else 0.0
+    macro_signal = "⚠️ 高利率环境 (-3%)" if current_10y_yield > 4.5 else "➡️ 宏观利率中性 (0%)"
 
-    # 3. 动量微调 (±3%)
     momentum_adj = 0.0
     if momentum_3m > 0.10:
         momentum_adj = -0.03
-        momentum_signal = "⚠️ 近3月涨幅过快/超买 (-3%)"
+        momentum_signal = "⚠️ 近3月涨幅过快 (-3%)"
     elif momentum_3m < -0.10:
         momentum_adj = +0.02
-        momentum_signal = "✅ 近3月超跌/反弹机会 (+2%)"
+        momentum_signal = "✅ 近3月超跌/具备反弹动能 (+2%)"
     else:
         momentum_signal = "➡️ 动量中性 (0%)"
 
-    # 最终计算仓位
-    raw_final_allocation = base_allocation + (technical_adj + macro_adj + momentum_adj) * 100
-    final_allocation = max(10.0, min(95.0, raw_final_allocation))
+    final_allocation = max(10.0, min(95.0, base_allocation + (technical_adj + macro_adj + momentum_adj) * 100))
 
     # -----------------------------------------------------------------------------
-    # 6. Streamlit 仪表盘UI渲染
+    # 4. Streamlit 界面呈现
     # -----------------------------------------------------------------------------
 
-    # 顶部关键 KPI 展板
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("综合估值风险评分", f"{valuation_risk_score:.1f} / 100", 
-                delta="危险" if valuation_risk_score > 65 else "安全", delta_color="inverse")
+                delta="偏高/危险" if valuation_risk_score > 65 else "合理/安全", delta_color="inverse")
     col2.metric("建议股票仓位", f"{final_allocation:.1f}%", 
-                delta=f"基础仓位: {base_allocation:.1f}%")
+                delta=f"基准仓位: {base_allocation:.1f}%")
     col3.metric("Shiller CAPE", f"{current_cape:.2f}", f"历史分位: {cape_percentile:.1f}%")
-    col4.metric("隐含 ERP (股权溢价)", f"{current_erp:.2f}%", f"10年美债: {current_10y_yield:.2f}%")
+    col4.metric("隐含 ERP", f"{current_erp:.2f}%", f"10年美债: {current_10y_yield:.2f}%")
 
     st.markdown("---")
 
-    # 主体二分栏布局
     left_col, right_col = st.columns([3, 2])
 
     with left_col:
@@ -249,40 +244,38 @@ if not data_error:
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=sp500_hist.index, y=sp500_hist['Close'], name="S&P 500 现价", line=dict(color='#1f77b4', width=2)))
         fig.add_trace(go.Scatter(x=sp500_hist.index, y=sp500_hist['200MA'], name="200日均线", line=dict(color='#ff7f0e', width=2, dash='dash')))
-        fig.update_layout(height=400, margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.update_layout(height=380, margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("📑 决策系统诊断说明")
+        st.subheader("📑 决策系统诊断")
         st.info(f"""
-        * **建议最终动作：** 保持股票仓位在 **{final_allocation:.1f}%**，其余 **{100 - final_allocation:.1f}%** 持有无风险现金/短债。
-        * **技术面状态：** {tech_signal}
-        * **宏观周期状态：** {macro_signal}
-        * **市场动量状态：** {momentum_signal}
+        * **建议动作：** 保持股票仓位 **{final_allocation:.1f}%**，现金/短债仓位 **{100 - final_allocation:.1f}%**。
+        * **技术面：** {tech_signal}
+        * **宏观环境：** {macro_signal}
+        * **动量状态：** {momentum_signal}
         """)
 
     with right_col:
-        st.subheader("🔍 四大指标归一化风险得分")
-        
+        st.subheader("🔍 四大指标得分与权重")
         scores_df = pd.DataFrame({
-            "核心指标": ["Shiller CAPE", "隐含 ERP", "巴菲特指数", "融资债务/GDP"],
-            "当前原始值": [f"{current_cape:.2f}", f"{current_erp:.2f}%", f"{current_buffett_ratio:.2f}", "中性"],
-            "风险得分 (0-100)": [cape_score, erp_score, buffett_score, margin_score],
-            "分配权重": [f"{w_cape*100:.0f}%", f"{w_erp*100:.0f}%", f"{w_buffett*100:.0f}%", f"{w_margin*100:.0f}%"]
+            "指标": ["Shiller CAPE", "隐含 ERP", "巴菲特指数", "融资杠杆"],
+            "原始值": [f"{current_cape:.2f}", f"{current_erp:.2f}%", f"{current_buffett_ratio:.2f}", "中性"],
+            "得分": [f"{cape_score:.1f}", f"{erp_score:.1f}", f"{buffett_score:.1f}", f"{margin_score:.1f}"],
+            "权重": [f"{w_cape*100:.0f}%", f"{w_erp*100:.0f}%", f"{w_buffett*100:.0f}%", f"{w_margin*100:.0f}%"]
         })
         st.dataframe(scores_df, use_container_width=True, hide_index=True)
 
-        st.subheader("⚠️ 风险控制与应急断路器")
+        st.subheader("⚠️ 风险控制")
         if valuation_risk_score > 70:
-            st.error("🚨 **高风险预警：** 当前市场整体估值处于偏贵区间，禁止使用任何杠杆，建议分批减仓。")
+            st.error("🚨 **高风险区：** 市场处于偏贵区间，严禁使用杠杆，建议主动降低持仓。")
         elif valuation_risk_score < 30:
-            st.success("🎉 **大周期买入信号：** 市场处于历史极度便宜区间，激活“底部优先”建仓机制！")
+            st.success("🎉 **极度便宜区：** 触发大周期建仓信号！")
         else:
-            st.warning("⚖️ **中性区间：** 市场风险与收益相对匹配，建议保持常态化中性仓位。")
+            st.warning("⚖️ **合理区间：** 风险与收益匹配，保持常态配置。")
 
-    # 侧边栏说明与数据源验证
-    st.sidebar.title("⚙️ 数据源健康度诊断")
-    st.sidebar.write("🟢 **Yale Shiller Excel:** 链接正常")
-    st.sidebar.write("🟢 **FRED (DGS10 / GDP):** 链接正常")
-    st.sidebar.write("🟢 **Yahoo Finance (^GSPC):** 链接正常")
+    st.sidebar.title("⚙️ 数据源状态")
+    st.sidebar.write("🟢 **Yale Shiller Excel:** 正常")
+    st.sidebar.write("🟢 **FRED (DGS10 / GDP / W5K):** 正常")
+    st.sidebar.write("🟢 **Yahoo Finance (^GSPC):** 正常")
     st.sidebar.markdown("---")
-    st.sidebar.caption(f"上次刷新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.sidebar.caption(f"最后更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
